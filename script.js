@@ -1,3 +1,30 @@
+/* ===== Firebase (shared cloud storage for Memories + Gallery) =====
+   Replace the values below with your own project's config from the
+   Firebase console (Project settings → General → Your apps → SDK setup).
+   Until you do, the site quietly falls back to this-device-only storage. */
+const firebaseConfig = {
+  apiKey: "AIza...",
+  authDomain: "you-and-me-xxxxx.firebaseapp.com",
+  projectId: "you-and-me-xxxxx",
+  storageBucket: "you-and-me-xxxxx.appspot.com",
+  messagingSenderId: "123456789",
+  appId: "1:123456789:web:abcdef123456"
+};
+
+const firebaseReady =
+  typeof firebase !== "undefined" && firebaseConfig.apiKey !== "AIza...";
+
+let db, storage;
+if (firebaseReady) {
+  firebase.initializeApp(firebaseConfig);
+  db = firebase.firestore();
+  storage = firebase.storage();
+} else if (typeof firebase !== "undefined") {
+  console.warn(
+    "Firebase config is still the placeholder — photos will only save to this device/browser. See README for setup steps."
+  );
+}
+
 window.addEventListener("load", () => {
   document.body.classList.add("loaded");
 });
@@ -59,7 +86,8 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 });
 
-/* Memories page: upload photos, persist them permanently in this browser */
+/* Memories page: upload photos, shared across devices via Firebase
+   (falls back to this-browser-only storage if Firebase isn't set up) */
 document.addEventListener("DOMContentLoaded", () => {
   const grid = document.getElementById("memories-grid");
   if (!grid) return;
@@ -74,21 +102,8 @@ document.addEventListener("DOMContentLoaded", () => {
     "linear-gradient(155deg, #3a5fe0, #7c4fd4)",
   ];
 
-  const load = () => {
-    try {
-      return JSON.parse(localStorage.getItem(STORAGE_KEY)) || [];
-    } catch {
-      return [];
-    }
-  };
-
-  const save = (memories) => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(memories));
-  };
-
-  const render = () => {
+  const render = (memories) => {
     grid.querySelectorAll(".memory-card:not(.memory-add)").forEach((el) => el.remove());
-    const memories = load();
 
     memories.forEach((memory, i) => {
       const card = document.createElement("div");
@@ -108,9 +123,10 @@ document.addEventListener("DOMContentLoaded", () => {
       del.textContent = "×";
       del.addEventListener("click", (e) => {
         e.stopPropagation();
-        const updated = load().filter((_, idx) => idx !== i);
-        save(updated);
-        render();
+        removeMemory(memory, i).catch((err) => {
+          console.error(err);
+          alert("Couldn't remove that memory. Please try again.");
+        });
       });
       card.appendChild(del);
 
@@ -122,29 +138,80 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   };
 
+  let addMemory, removeMemory;
+
+  if (firebaseReady) {
+    // Realtime shared storage: every visitor with this page open sees
+    // updates the moment either of you adds or removes a memory.
+    db.collection("memories").orderBy("createdAt", "asc").onSnapshot(
+      (snap) => render(snap.docs.map((doc) => ({ id: doc.id, ...doc.data() }))),
+      (err) => console.error("Memories sync error:", err)
+    );
+
+    addMemory = async (file, caption) => {
+      const path = `memories/${Date.now()}_${file.name}`;
+      const ref = storage.ref(path);
+      await ref.put(file);
+      const src = await ref.getDownloadURL();
+      await db.collection("memories").add({ src, caption, path, createdAt: Date.now() });
+    };
+
+    removeMemory = async (memory) => {
+      await db.collection("memories").doc(memory.id).delete();
+      if (memory.path) storage.ref(memory.path).delete().catch(() => {});
+    };
+  } else {
+    // Fallback: this browser only, until Firebase is configured
+    const load = () => {
+      try {
+        return JSON.parse(localStorage.getItem(STORAGE_KEY)) || [];
+      } catch {
+        return [];
+      }
+    };
+    const save = (memories) => localStorage.setItem(STORAGE_KEY, JSON.stringify(memories));
+
+    addMemory = async (file, caption) => {
+      const src = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+      const memories = load();
+      memories.push({ src, caption });
+      save(memories);
+      render(memories);
+    };
+
+    removeMemory = async (_memory, i) => {
+      const memories = load().filter((_, idx) => idx !== i);
+      save(memories);
+      render(memories);
+    };
+
+    render(load());
+  }
+
   addBtn?.addEventListener("click", () => fileInput.click());
 
   fileInput?.addEventListener("change", () => {
     const file = fileInput.files?.[0];
     if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = () => {
-      const caption = window.prompt("Add a short caption for this memory (optional):", "") || "";
-      const memories = load();
-      memories.push({ src: reader.result, caption });
-      save(memories);
-      render();
-      fileInput.value = "";
-    };
-    reader.readAsDataURL(file);
+    const caption = window.prompt("Add a short caption for this memory (optional):", "") || "";
+    addMemory(file, caption)
+      .catch((err) => {
+        console.error(err);
+        alert("Couldn't save that photo. Please try again.");
+      })
+      .finally(() => {
+        fileInput.value = "";
+      });
   });
-
-  render();
 });
 
 /* 3D rotating carousel (gallery page) — continuous auto-rotate,
-   hover zoom, persistent photos, adjustable slide count */
+   hover zoom, shared photos via Firebase, adjustable slide count */
 document.addEventListener("DOMContentLoaded", () => {
   const container = document.querySelector(".carousel-container");
   if (!container) return;
@@ -167,18 +234,7 @@ document.addEventListener("DOMContentLoaded", () => {
   let rotation = 0;
   let isPaused = false;
   let editIndex = null;
-
-  const loadPhotos = () => {
-    try {
-      return JSON.parse(localStorage.getItem(STORAGE_KEY)) || {};
-    } catch {
-      return {};
-    }
-  };
-
-  const savePhotos = (photos) => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(photos));
-  };
+  let photos = {}; // in-memory cache of { [slotIndex]: { src, path? } }
 
   const applyPhoto = (item, src) => {
     item.style.backgroundImage = `url(${src})`;
@@ -208,7 +264,6 @@ document.addEventListener("DOMContentLoaded", () => {
   /* rebuild the carousel with a given number of slots, keeping any
      saved photos that still fit within the new count */
   const buildItems = (count) => {
-    const photos = loadPhotos();
     container.innerHTML = "";
     items = [];
 
@@ -234,10 +289,10 @@ document.addEventListener("DOMContentLoaded", () => {
       removeBtn.textContent = "×";
       removeBtn.addEventListener("click", (e) => {
         e.stopPropagation();
-        const stored = loadPhotos();
-        delete stored[i];
-        savePhotos(stored);
-        clearPhoto(item);
+        removePhoto(i).catch((err) => {
+          console.error(err);
+          alert("Couldn't remove that photo. Please try again.");
+        });
       });
       item.appendChild(removeBtn);
 
@@ -246,7 +301,7 @@ document.addEventListener("DOMContentLoaded", () => {
         fileInput?.click();
       });
 
-      if (photos[i]) applyPhoto(item, photos[i]);
+      if (photos[i]) applyPhoto(item, photos[i].src);
 
       container.appendChild(item);
       items.push(item);
@@ -257,20 +312,88 @@ document.addEventListener("DOMContentLoaded", () => {
     applyRotation();
   };
 
+  /* reapply the current photo cache onto whatever items exist right
+     now, without rebuilding the DOM (keeps rotation uninterrupted) */
+  const refreshPhotos = () => {
+    items.forEach((item, i) => {
+      if (photos[i]) applyPhoto(item, photos[i].src);
+      else clearPhoto(item);
+    });
+  };
+
+  let setPhoto, removePhoto;
+
+  if (firebaseReady) {
+    // Realtime shared storage: photo edits show up for both of you live.
+    db.collection("gallery").onSnapshot(
+      (snap) => {
+        const next = {};
+        snap.forEach((doc) => {
+          next[doc.id] = doc.data();
+        });
+        photos = next;
+        refreshPhotos();
+      },
+      (err) => console.error("Gallery sync error:", err)
+    );
+
+    setPhoto = async (index, file) => {
+      const path = `gallery/${index}`;
+      const ref = storage.ref(path);
+      await ref.put(file);
+      const src = await ref.getDownloadURL();
+      await db.collection("gallery").doc(String(index)).set({ src, path });
+    };
+
+    removePhoto = async (index) => {
+      await db.collection("gallery").doc(String(index)).delete();
+      storage.ref(`gallery/${index}`).delete().catch(() => {});
+    };
+  } else {
+    // Fallback: this browser only, until Firebase is configured
+    const loadPhotos = () => {
+      try {
+        return JSON.parse(localStorage.getItem(STORAGE_KEY)) || {};
+      } catch {
+        return {};
+      }
+    };
+    const savePhotos = (p) => localStorage.setItem(STORAGE_KEY, JSON.stringify(p));
+    photos = loadPhotos();
+
+    setPhoto = async (index, file) => {
+      const src = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+      photos = { ...loadPhotos(), [index]: { src } };
+      savePhotos(photos);
+      applyPhoto(items[index], src);
+    };
+
+    removePhoto = async (index) => {
+      photos = loadPhotos();
+      delete photos[index];
+      savePhotos(photos);
+      clearPhoto(items[index]);
+    };
+  }
+
   fileInput?.addEventListener("change", () => {
     const file = fileInput.files?.[0];
     if (!file || editIndex === null) return;
-
-    const reader = new FileReader();
-    reader.onload = () => {
-      const photos = loadPhotos();
-      photos[editIndex] = reader.result;
-      savePhotos(photos);
-      applyPhoto(items[editIndex], reader.result);
-      fileInput.value = "";
-      editIndex = null;
-    };
-    reader.readAsDataURL(file);
+    const index = editIndex;
+    editIndex = null;
+    setPhoto(index, file)
+      .catch((err) => {
+        console.error(err);
+        alert("Couldn't save that photo. Please try again.");
+      })
+      .finally(() => {
+        fileInput.value = "";
+      });
   });
 
   container.style.transition = "none";
@@ -310,15 +433,6 @@ document.addEventListener("DOMContentLoaded", () => {
     : 5;
   buildItems(initialCount);
 });
-
-const firebaseConfig = {
-  apiKey: "AIza...",
-  authDomain: "you-and-me-xxxxx.firebaseapp.com",
-  projectId: "you-and-me-xxxxx",
-  storageBucket: "you-and-me-xxxxx.appspot.com",
-  messagingSenderId: "123456789",
-  appId: "1:123456789:web:abcdef123456"
-};
 
 /* Typewriter effect for the message page */
 document.addEventListener("DOMContentLoaded", () => {
