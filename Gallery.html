@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Gallery · You & Me</title>
+  <title>You & Me</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600&family=Poppins:wght@300;400;500&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="style.css" />
@@ -19,42 +19,41 @@
     <div class="nav-links" id="nav-links">
       <a href="index.html">Home</a>
       <a href="memories.html">Memories</a>
-      <a href="gallery.html" class="active">Gallery</a>
+      <a href="gallery.html">Gallery</a>
       <a href="message.html">Message</a>
       <a href="ourstory.html">Our Story</a>
     </div>
   </nav>
 
-  <section class="content fade-in">
-    <span class="eyebrow">In motion</span>
-    <h1>Gallery</h1>
-    <p class="lede">
-      A slow-spinning carousel of our favorite clips. Hover a card to see
-      it up close, click it to upload a photo — saved right in this
-      browser, so it'll still be here next time you visit.
-    </p>
+  <div id="particle-field"></div>
 
-    <div class="carousel-stage">
-      <div class="carousel-container">
-        <div class="carousel-item">Clip 01</div>
-        <div class="carousel-item">Clip 02</div>
-        <div class="carousel-item">Clip 03</div>
-        <div class="carousel-item">Clip 04</div>
-        <div class="carousel-item">Clip 05</div>
+  <section class="hero fade-in">
+    <div class="hero-content">
+      <span class="eyebrow">A little space just for us</span>
+      <h1>Every day,<br />I choose you again.</h1>
+      <p class="lede">
+        This is our corner of the internet — the memories we've collected,
+        the faces we love, and the little reasons this still feels like home.
+      </p>
+      <div class="btn-row">
+        <a class="btn btn-primary" href="memories.html">See our memories</a>
+        <a class="btn btn-ghost" href="ourstory.html">Read our story</a>
       </div>
-    </div>
 
-    <input type="file" id="carousel-file-input" accept="image/*" hidden />
-
-    <div class="carousel-controls">
-      <button id="prev-btn" aria-label="Previous">&#8592;</button>
-      <button id="next-btn" aria-label="Next">&#8594;</button>
-    </div>
-
-    <div class="carousel-count-control">
-      <label for="carousel-count">Number of photos</label>
-      <input type="number" id="carousel-count" min="2" max="12" value="5" />
-      <button id="carousel-count-apply" type="button" class="btn btn-ghost">Update</button>
+      <div class="stat-row">
+        <div>
+          <div class="stat-num">1st</div>
+          <div class="stat-label">Month, and counting</div>
+        </div>
+        <div>
+          <div class="stat-num">&#8734;</div>
+          <div class="stat-label">inside jokes</div>
+        </div>
+        <div>
+          <div class="stat-num">01</div>
+          <div class="stat-label">favorite person</div>
+        </div>
+      </div>
     </div>
   </section>
 
