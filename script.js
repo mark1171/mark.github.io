@@ -5,8 +5,35 @@ window.addEventListener("load", () => {
 /* Highlight current page in nav */
 document.addEventListener("DOMContentLoaded", () => {
   const path = location.pathname.split("/").pop() || "index.html";
-  document.querySelectorAll("nav a").forEach((link) => {
+  document.querySelectorAll(".nav-links a").forEach((link) => {
     if (link.getAttribute("href") === path) link.classList.add("active");
+  });
+});
+
+/* Mobile nav toggle */
+document.addEventListener("DOMContentLoaded", () => {
+  const toggle = document.getElementById("nav-toggle");
+  const links = document.getElementById("nav-links");
+  if (!toggle || !links) return;
+
+  const closeMenu = () => {
+    toggle.classList.remove("open");
+    links.classList.remove("open");
+    toggle.setAttribute("aria-expanded", "false");
+  };
+
+  toggle.addEventListener("click", () => {
+    const isOpen = links.classList.toggle("open");
+    toggle.classList.toggle("open", isOpen);
+    toggle.setAttribute("aria-expanded", String(isOpen));
+  });
+
+  links.querySelectorAll("a").forEach((link) => {
+    link.addEventListener("click", closeMenu);
+  });
+
+  window.addEventListener("resize", () => {
+    if (window.innerWidth > 720) closeMenu();
   });
 });
 
@@ -283,6 +310,15 @@ document.addEventListener("DOMContentLoaded", () => {
     : 5;
   buildItems(initialCount);
 });
+
+const firebaseConfig = {
+  apiKey: "AIza...",
+  authDomain: "you-and-me-xxxxx.firebaseapp.com",
+  projectId: "you-and-me-xxxxx",
+  storageBucket: "you-and-me-xxxxx.appspot.com",
+  messagingSenderId: "123456789",
+  appId: "1:123456789:web:abcdef123456"
+};
 
 /* Typewriter effect for the message page */
 document.addEventListener("DOMContentLoaded", () => {
