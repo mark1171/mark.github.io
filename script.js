@@ -1,33 +1,69 @@
-/* ===== Firebase (shared cloud storage for Memories + Gallery) =====
-   Replace the values below with your own project's config from the
-   Firebase console (Project settings → General → Your apps → SDK setup).
-   Until you do, the site quietly falls back to this-device-only storage. */
-const firebaseConfig = {
-  apiKey: "AIza...",
-  authDomain: "you-and-me-xxxxx.firebaseapp.com",
-  projectId: "you-and-me-xxxxx",
-  storageBucket: "you-and-me-xxxxx.appspot.com",
-  messagingSenderId: "123456789",
-  appId: "1:123456789:web:abcdef123456"
-};
-
-const firebaseReady =
-  typeof firebase !== "undefined" && firebaseConfig.apiKey !== "AIza...";
-
-let db, storage;
-if (firebaseReady) {
-  firebase.initializeApp(firebaseConfig);
-  db = firebase.firestore();
-  storage = firebase.storage();
-} else if (typeof firebase !== "undefined") {
-  console.warn(
-    "Firebase config is still the placeholder — photos will only save to this device/browser. See README for setup steps."
-  );
-}
-
 window.addEventListener("load", () => {
   document.body.classList.add("loaded");
 });
+
+/* Upload a file straight to Cloudinary from the browser (no backend
+   needed) using an unsigned upload preset. Pass a publicId to control
+   the stored filename (used for the manifest + fixed gallery slots);
+   leave it out to let Cloudinary generate a unique one. */
+function uploadToCloudinary(file, publicId) {
+  const cloudName = window.CLOUDINARY_CLOUD_NAME;
+  const uploadPreset = window.CLOUDINARY_UPLOAD_PRESET;
+
+  if (!cloudName || cloudName.startsWith("PASTE_")) {
+    return Promise.reject(new Error("Cloudinary isn't configured yet — check cloudinary-config.js"));
+  }
+
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("upload_preset", uploadPreset);
+  if (publicId) formData.append("public_id", publicId);
+
+  return fetch(`https://api.cloudinary.com/v1_1/${cloudName}/image/upload`, {
+    method: "POST",
+    body: formData,
+  }).then((res) => {
+    if (!res.ok) throw new Error("Cloudinary upload failed");
+    return res.json();
+  }).then((data) => data.secure_url);
+}
+
+/* Ask Cloudinary to deliver a resized, auto-optimized version of an
+   image instead of the full original — faster loading, same URL host. */
+function optimizedUrl(url, width = 500) {
+  if (!url || !url.includes("/upload/")) return url;
+  return url.replace("/upload/", `/upload/w_${width},q_auto,f_auto/`);
+}
+
+/* A tiny JSON "index" file, stored as a raw Cloudinary asset at a
+   fixed public ID, acts as the shared list of photos + captions —
+   no separate database needed. Each save overwrites that same file. */
+function saveManifest(publicId, data) {
+  const cloudName = window.CLOUDINARY_CLOUD_NAME;
+  const uploadPreset = window.CLOUDINARY_UPLOAD_PRESET;
+  const blob = new Blob([JSON.stringify(data)], { type: "application/json" });
+
+  const formData = new FormData();
+  formData.append("file", blob, `${publicId}.json`);
+  formData.append("upload_preset", uploadPreset);
+  formData.append("public_id", publicId);
+
+  return fetch(`https://api.cloudinary.com/v1_1/${cloudName}/raw/upload`, {
+    method: "POST",
+    body: formData,
+  }).then((res) => {
+    if (!res.ok) throw new Error("Couldn't save the photo list");
+    return res.json();
+  });
+}
+
+function loadManifest(publicId, fallback) {
+  const cloudName = window.CLOUDINARY_CLOUD_NAME;
+  const url = `https://res.cloudinary.com/${cloudName}/raw/upload/${publicId}.json?_=${Date.now()}`;
+  return fetch(url)
+    .then((res) => (res.ok ? res.json() : fallback))
+    .catch(() => fallback);
+}
 
 /* Highlight current page in nav */
 document.addEventListener("DOMContentLoaded", () => {
@@ -86,15 +122,16 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 });
 
-/* Memories page: upload photos, shared across devices via Firebase
-   (falls back to this-browser-only storage if Firebase isn't set up) */
+/* Memories page: upload photos to Cloudinary, keep the list of them
+   (with captions) in a small JSON manifest also stored on Cloudinary —
+   so the whole thing works with just one service, synced everywhere. */
 document.addEventListener("DOMContentLoaded", () => {
   const grid = document.getElementById("memories-grid");
   if (!grid) return;
 
   const addBtn = document.getElementById("add-memory-btn");
   const fileInput = document.getElementById("memory-file-input");
-  const STORAGE_KEY = "you-and-me:memories";
+  const MANIFEST_ID = "you-and-me-memories-manifest";
 
   const grads = [
     "linear-gradient(155deg, #4f7cff, #8b5cf6)",
@@ -108,7 +145,7 @@ document.addEventListener("DOMContentLoaded", () => {
     memories.forEach((memory, i) => {
       const card = document.createElement("div");
       card.className = "memory-card has-photo";
-      card.style.backgroundImage = `url(${memory.src})`;
+      card.style.backgroundImage = `url(${optimizedUrl(memory.src, 400)})`;
       card.style.setProperty("--grad", grads[i % grads.length]);
       card.style.animationDelay = `${i * 0.06}s`;
 
@@ -123,9 +160,11 @@ document.addEventListener("DOMContentLoaded", () => {
       del.textContent = "×";
       del.addEventListener("click", (e) => {
         e.stopPropagation();
-        removeMemory(memory, i).catch((err) => {
-          console.error(err);
-          alert("Couldn't remove that memory. Please try again.");
+        loadManifest(MANIFEST_ID, []).then((current) => {
+          const updated = current.filter((_, idx) => idx !== i);
+          saveManifest(MANIFEST_ID, updated)
+            .then(() => render(updated))
+            .catch(() => alert("Couldn't remove that memory — check your connection and try again."));
         });
       });
       card.appendChild(del);
@@ -138,85 +177,41 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   };
 
-  let addMemory, removeMemory;
-
-  if (firebaseReady) {
-    // Realtime shared storage: every visitor with this page open sees
-    // updates the moment either of you adds or removes a memory.
-    db.collection("memories").orderBy("createdAt", "asc").onSnapshot(
-      (snap) => render(snap.docs.map((doc) => ({ id: doc.id, ...doc.data() }))),
-      (err) => console.error("Memories sync error:", err)
-    );
-
-    addMemory = async (file, caption) => {
-      const path = `memories/${Date.now()}_${file.name}`;
-      const ref = storage.ref(path);
-      await ref.put(file);
-      const src = await ref.getDownloadURL();
-      await db.collection("memories").add({ src, caption, path, createdAt: Date.now() });
-    };
-
-    removeMemory = async (memory) => {
-      await db.collection("memories").doc(memory.id).delete();
-      if (memory.path) storage.ref(memory.path).delete().catch(() => {});
-    };
-  } else {
-    // Fallback: this browser only, until Firebase is configured
-    const load = () => {
-      try {
-        return JSON.parse(localStorage.getItem(STORAGE_KEY)) || [];
-      } catch {
-        return [];
-      }
-    };
-    const save = (memories) => localStorage.setItem(STORAGE_KEY, JSON.stringify(memories));
-
-    addMemory = async (file, caption) => {
-      const src = await new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result);
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-      });
-      const memories = load();
-      memories.push({ src, caption });
-      save(memories);
-      render(memories);
-    };
-
-    removeMemory = async (_memory, i) => {
-      const memories = load().filter((_, idx) => idx !== i);
-      save(memories);
-      render(memories);
-    };
-
-    render(load());
-  }
-
   addBtn?.addEventListener("click", () => fileInput.click());
 
   fileInput?.addEventListener("change", () => {
     const file = fileInput.files?.[0];
     if (!file) return;
-    const caption = window.prompt("Add a short caption for this memory (optional):", "") || "";
-    addMemory(file, caption)
+
+    uploadToCloudinary(file)
+      .then((url) => {
+        const caption = window.prompt("Add a short caption for this memory (optional):", "") || "";
+        return loadManifest(MANIFEST_ID, []).then((current) => {
+          const updated = [...current, { src: url, caption }];
+          return saveManifest(MANIFEST_ID, updated).then(() => render(updated));
+        });
+      })
+      .then(() => {
+        fileInput.value = "";
+      })
       .catch((err) => {
         console.error(err);
-        alert("Couldn't save that photo. Please try again.");
-      })
-      .finally(() => {
+        alert("Sorry, that photo couldn't be saved. Please check your connection and try again.");
         fileInput.value = "";
       });
   });
+
+  loadManifest(MANIFEST_ID, []).then(render);
 });
 
 /* 3D rotating carousel (gallery page) — continuous auto-rotate,
-   hover zoom, shared photos via Firebase, adjustable slide count */
+   hover zoom, Cloudinary-only photo storage (manifest + fixed-slot
+   uploads), adjustable slide count, synced across devices */
 document.addEventListener("DOMContentLoaded", () => {
   const container = document.querySelector(".carousel-container");
   if (!container) return;
 
-  const STORAGE_KEY = "you-and-me:gallery";
+  const MANIFEST_ID = "you-and-me-gallery-manifest";
   const fileInput = document.getElementById("carousel-file-input");
   const countInput = document.getElementById("carousel-count");
   const countApplyBtn = document.getElementById("carousel-count-apply");
@@ -234,10 +229,10 @@ document.addEventListener("DOMContentLoaded", () => {
   let rotation = 0;
   let isPaused = false;
   let editIndex = null;
-  let photos = {}; // in-memory cache of { [slotIndex]: { src, path? } }
+  let currentPhotos = {};
 
   const applyPhoto = (item, src) => {
-    item.style.backgroundImage = `url(${src})`;
+    item.style.backgroundImage = `url(${optimizedUrl(src, 500)})`;
     item.classList.add("has-photo");
   };
 
@@ -261,8 +256,8 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   };
 
-  /* rebuild the carousel with a given number of slots, keeping any
-     saved photos that still fit within the new count */
+  /* rebuild the carousel with a given number of slots, applying any
+     photos already saved in the manifest */
   const buildItems = (count) => {
     container.innerHTML = "";
     items = [];
@@ -289,9 +284,15 @@ document.addEventListener("DOMContentLoaded", () => {
       removeBtn.textContent = "×";
       removeBtn.addEventListener("click", (e) => {
         e.stopPropagation();
-        removePhoto(i).catch((err) => {
-          console.error(err);
-          alert("Couldn't remove that photo. Please try again.");
+        loadManifest(MANIFEST_ID, {}).then((current) => {
+          const updated = { ...current };
+          delete updated[i];
+          saveManifest(MANIFEST_ID, updated)
+            .then(() => {
+              currentPhotos = updated;
+              clearPhoto(item);
+            })
+            .catch(() => alert("Couldn't remove that photo — check your connection and try again."));
         });
       });
       item.appendChild(removeBtn);
@@ -301,7 +302,7 @@ document.addEventListener("DOMContentLoaded", () => {
         fileInput?.click();
       });
 
-      if (photos[i]) applyPhoto(item, photos[i].src);
+      if (currentPhotos[i]) applyPhoto(item, currentPhotos[i]);
 
       container.appendChild(item);
       items.push(item);
@@ -312,87 +313,29 @@ document.addEventListener("DOMContentLoaded", () => {
     applyRotation();
   };
 
-  /* reapply the current photo cache onto whatever items exist right
-     now, without rebuilding the DOM (keeps rotation uninterrupted) */
-  const refreshPhotos = () => {
-    items.forEach((item, i) => {
-      if (photos[i]) applyPhoto(item, photos[i].src);
-      else clearPhoto(item);
-    });
-  };
-
-  let setPhoto, removePhoto;
-
-  if (firebaseReady) {
-    // Realtime shared storage: photo edits show up for both of you live.
-    db.collection("gallery").onSnapshot(
-      (snap) => {
-        const next = {};
-        snap.forEach((doc) => {
-          next[doc.id] = doc.data();
-        });
-        photos = next;
-        refreshPhotos();
-      },
-      (err) => console.error("Gallery sync error:", err)
-    );
-
-    setPhoto = async (index, file) => {
-      const path = `gallery/${index}`;
-      const ref = storage.ref(path);
-      await ref.put(file);
-      const src = await ref.getDownloadURL();
-      await db.collection("gallery").doc(String(index)).set({ src, path });
-    };
-
-    removePhoto = async (index) => {
-      await db.collection("gallery").doc(String(index)).delete();
-      storage.ref(`gallery/${index}`).delete().catch(() => {});
-    };
-  } else {
-    // Fallback: this browser only, until Firebase is configured
-    const loadPhotos = () => {
-      try {
-        return JSON.parse(localStorage.getItem(STORAGE_KEY)) || {};
-      } catch {
-        return {};
-      }
-    };
-    const savePhotos = (p) => localStorage.setItem(STORAGE_KEY, JSON.stringify(p));
-    photos = loadPhotos();
-
-    setPhoto = async (index, file) => {
-      const src = await new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result);
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-      });
-      photos = { ...loadPhotos(), [index]: { src } };
-      savePhotos(photos);
-      applyPhoto(items[index], src);
-    };
-
-    removePhoto = async (index) => {
-      photos = loadPhotos();
-      delete photos[index];
-      savePhotos(photos);
-      clearPhoto(items[index]);
-    };
-  }
-
   fileInput?.addEventListener("change", () => {
     const file = fileInput.files?.[0];
     if (!file || editIndex === null) return;
-    const index = editIndex;
-    editIndex = null;
-    setPhoto(index, file)
+
+    uploadToCloudinary(file, `you-and-me-gallery-slot-${editIndex}`)
+      .then((url) => {
+        return loadManifest(MANIFEST_ID, {}).then((current) => {
+          const updated = { ...current, [editIndex]: url };
+          return saveManifest(MANIFEST_ID, updated).then(() => {
+            currentPhotos = updated;
+            applyPhoto(items[editIndex], url);
+          });
+        });
+      })
+      .then(() => {
+        fileInput.value = "";
+        editIndex = null;
+      })
       .catch((err) => {
         console.error(err);
-        alert("Couldn't save that photo. Please try again.");
-      })
-      .finally(() => {
+        alert("Sorry, that photo couldn't be saved. Please check your connection and try again.");
         fileInput.value = "";
+        editIndex = null;
       });
   });
 
@@ -431,7 +374,11 @@ document.addEventListener("DOMContentLoaded", () => {
   const initialCount = countInput
     ? Math.min(12, Math.max(2, parseInt(countInput.value, 10) || 5))
     : 5;
-  buildItems(initialCount);
+
+  loadManifest(MANIFEST_ID, {}).then((photos) => {
+    currentPhotos = photos;
+    buildItems(initialCount);
+  });
 });
 
 /* Typewriter effect for the message page */
